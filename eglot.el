@@ -342,31 +342,31 @@ on unknown notifications and errors on unknown requests.
                                (enforce-required t)
                                (disallow-non-standard t)
                                (check-types t))
-  "Check that OBJECT conforms to INTERFACE.  Error otherwise."
+  "Check that OBJECT conforms to INTERFACE."
+  ;; TODO: `pcase-let' doesn't trigger this
   (cl-destructuring-bind
       (&key types required-keys optional-keys &allow-other-keys)
       (eglot--interface interface-name)
-    (when-let ((missing (and enforce-required
-                             (cl-set-difference required-keys
-                                                (eglot--plist-keys object)))))
-      (eglot--error "A `%s' must have %s" interface-name missing))
-    (when-let ((excess (and disallow-non-standard
-                            (cl-set-difference
-                             (eglot--plist-keys object)
-                             (append required-keys optional-keys)))))
-      (eglot--error "A `%s' mustn't have %s" interface-name excess))
-    (when check-types
-      (cl-loop
-       for (k v) on object by #'cddr
-       for type = (or (cdr (assoc k types)) t) ;; FIXME: enforce nil type?
-       unless (cl-typep v type)
-       do (eglot--error "A `%s' must have a %s as %s, but has %s"
-                        interface-name )))
-    t))
+    (not
+     (or (and enforce-required
+              (cl-set-difference required-keys
+                                 (eglot--plist-keys object)))
+         (and disallow-non-standard
+              (cl-set-difference
+               (eglot--plist-keys object)
+               (append required-keys optional-keys)))
+         (and check-types
+              (cl-loop
+               for (k v) on object by #'cddr
+               for type = (or (cdr (assoc k types)) t) ;; FIXME: enforce nil type?
+               thereis (not (cl-typep v type))))))))
 
 (eval-and-compile
+  (defun eglot--keywordize-var (var)
+    (intern (format ":%s" var)))
+
   (defun eglot--keywordize-vars (vars)
-    (mapcar (lambda (var) (intern (format ":%s" var))) vars))
+    (mapcar #'eglot--keywordize-var vars))
 
   (defun eglot--ensure-type (k) (if (consp k) k (cons k t)))
 
@@ -410,6 +410,45 @@ on unknown notifications and errors on unknown requests.
                                   interface-name missing-out))))
             (t
              (byte-compile-warn "Unknown LSP interface %s" interface-name))))))
+
+(defmacro eglot--make-pcase-macroexpander (interface-name)
+  `(pcase-defmacro ,interface-name (&rest bindings)
+     (let ((desired-keys (mapcar (pcase-lambda ((or `(,key ,_)
+                                                    `(,key)
+                                                    key))
+                                   key)
+                                 bindings)))
+       ;; check spec at macro-expansion time
+       (eglot--check-dspec ',interface-name desired-keys)
+       `(and
+         (pred listp)
+         ;; check object at runtime, honoring `eglot-strict-mode'
+         (pred (lambda (obj)
+                 (eglot--check-object ',',interface-name obj
+                                      t
+                                      (memq 'disallow-non-standard-keys eglot-strict-mode)
+                                      t)))
+         ;; bind
+         ,@(mapcar (lambda (binding)
+                     (pcase-exhaustive binding
+                       (`(,key ,pattern)
+                        `(app (lambda (obj)
+                                (plist-get obj ,(eglot--keywordize-var key)))
+                              ,pattern))
+                       ((or `(,key)
+                            key)
+                        `(app (lambda (obj)
+                                (plist-get obj ,(eglot--keywordize-var key)))
+                              ,key))))
+                   bindings)))))
+
+(defmacro eglot--make-all-pcase-macroexpanders ()
+  `(progn
+     ,@(mapcar (pcase-lambda (`(,interface-name ,_req  ,_opt))
+                 `(eglot--make-pcase-macroexpander ,interface-name))
+               eglot--lsp-interface-alist)))
+
+(eglot--make-all-pcase-macroexpanders)
 
 (cl-defmacro eglot--dbind (vars object &body body)
   "Destructure OBJECT, binding VARS in BODY.

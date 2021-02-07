@@ -844,87 +844,102 @@ pyls prefers autopep over yafp, despite its README stating the contrary."
 (ert-deftest eglot-strict-interfaces ()
   (let ((eglot--lsp-interface-alist
          `((FooObject . ((:foo :bar) (:baz))))))
-    (should
-     (equal '("foo" . "bar")
-            (let ((eglot-strict-mode nil))
-              (eglot--dbind (foo bar) `(:foo "foo" :bar "bar")
-                (cons foo bar)))))
-    (should-error
+    (eglot--make-pcase-macroexpander FooObject)
+    (should-not
      (let ((eglot-strict-mode '(disallow-non-standard-keys)))
-       (eglot--dbind (foo bar) `(:foo "foo" :bar "bar" :fotrix bargh)
-         (cons foo bar))))
-    (should
-     (equal '("foo" . "bar")
-            (let ((eglot-strict-mode nil))
-              (eglot--dbind (foo bar) `(:foo "foo" :bar "bar" :fotrix bargh)
-                (cons foo bar)))))
-    (should-error
-     (let ((eglot-strict-mode '(disallow-non-standard-keys)))
-       (eglot--dbind ((FooObject) foo bar) `(:foo "foo" :bar "bar" :fotrix bargh)
+       (pcase-let (((FooObject foo bar) `(:foo "foo" :bar "bar" :fotrix bargh)))
          (cons foo bar))))
     (should
      (equal '("foo" . "bar")
             (let ((eglot-strict-mode '(disallow-non-standard-keys)))
-              (eglot--dbind ((FooObject) foo bar) `(:foo "foo" :bar "bar" :baz bargh)
+              (pcase-let (((FooObject foo bar) `(:foo "foo" :bar "bar" :baz bargh)))
                 (cons foo bar)))))
     (should
      (equal '("foo" . nil)
             (let ((eglot-strict-mode nil))
-              (eglot--dbind ((FooObject) foo bar) `(:foo "foo" :baz bargh)
+              (pcase-let (((FooObject foo bar) `(:foo "foo" :baz bargh)))
                 (cons foo bar)))))
     (should
      (equal '("foo" . "bar")
             (let ((eglot-strict-mode '(enforce-required-keys)))
-              (eglot--dbind ((FooObject) foo bar) `(:foo "foo" :bar "bar" :baz bargh)
+              (pcase-let (((FooObject foo bar) `(:foo "foo" :bar "bar" :baz bargh)))
                 (cons foo bar)))))
-    (should-error
+    (should-not
      (let ((eglot-strict-mode '(enforce-required-keys)))
-       (eglot--dbind ((FooObject) foo bar) `(:foo "foo" :baz bargh)
+       (pcase-let (((FooObject foo bar) `(:foo "foo" :baz bargh)))
          (cons foo bar))))))
 
-(ert-deftest eglot-dcase ()
+(ert-deftest eglot-pcase ()
   (let ((eglot--lsp-interface-alist
          `((FooObject . ((:foo :bar) (:baz)))
-           (CodeAction (:title) (:kind :diagnostics :edit :command))
-           (Command ((:title . string) (:command . string)) (:arguments)))))
+           (CodeActionTest (:title) (:kind :diagnostics :edit :command))
+           (CommandTest ((:title . string) (:command . string)) (:arguments)))))
+    (eglot--make-pcase-macroexpander FooObject)
+    (eglot--make-pcase-macroexpander CodeActionTest)
+    (eglot--make-pcase-macroexpander CommandTest)
     (should
      (equal
       "foo"
-      (eglot--dcase `(:foo "foo" :bar "bar")
-        (((FooObject) foo)
+      (pcase `(:foo "foo" :bar "bar")
+        ((FooObject foo)
          foo))))
     (should
      (equal
       (list "foo" '(:title "hey" :command "ho") "some edit")
-      (eglot--dcase '(:title "foo"
-                             :command (:title "hey" :command "ho")
-                             :edit "some edit")
-        (((Command) _title _command _arguments)
-         (ert-fail "Shouldn't have destructured this object as a Command"))
-        (((CodeAction) title edit command)
+      (pcase '(:title "foo"
+                      :command (:title "hey" :command "ho")
+                      :edit "some edit")
+        ((CommandTest)
+         (ert-fail "Shouldn't have destructured this object as a CommandTest"))
+        ((CodeActionTest title edit command)
          (list title command edit)))))
     (should
      (equal
       (list "foo" "some command" nil)
-      (eglot--dcase '(:title "foo" :command "some command")
-        (((Command) title command arguments)
+      (pcase '(:title "foo" :command "some command")
+        ((CommandTest title command arguments)
          (list title command arguments))
-        (((CodeAction) _title _edit _command)
-         (ert-fail "Shouldn't have destructured this object as a CodeAction")))))))
+        ((CodeActionTest)
+         (ert-fail "Shouldn't have destructured this object as a CodeActionTest")))))))
 
-(ert-deftest eglot-dcase-issue-452 ()
+(ert-deftest eglot-pcase-nested ()
   (let ((eglot--lsp-interface-alist
-         `((FooObject . ((:foo :bar) (:baz)))
+         `((TextDocumentEditTest (:textDocument :edits) ())
+           (VersionedTextDocumentIdentifierTest (:uri :version) ()))))
+    (eglot--make-pcase-macroexpander TextDocumentEditTest)
+    (eglot--make-pcase-macroexpander VersionedTextDocumentIdentifierTest)
+    (should (equal "here"
+                   (pcase '( :textDocument (:uri "here" :version 42)
+                             :edits [])
+                     ((TextDocumentEditTest (textDocument (VersionedTextDocumentIdentifierTest uri)))
+                      uri))))))
+
+(ert-deftest eglot-pcase-nested-2 ()
+  (should (equal "here"
+                 (pcase '( :textDocument (:uri "here" :version 42)
+                           :edits [])
+                   ((TextDocumentEdit (textDocument (VersionedTextDocumentIdentifier uri)))
+                    uri)))))
+
+(ert-deftest eglot-pcase-issue-452 ()
+  (let ((eglot--lsp-interface-alist
+         `(
+           ;; (FooObject . ((:foo :bar) (:baz)))
            (CodeAction (:title) (:kind :diagnostics :edit :command))
            (Command ((string . :title) (:command . string)) (:arguments)))))
+    ;; (eglot--make-all-pcase-macroexpanders)
     (should
      (equal
       (list "foo" '(:command "cmd" :title "alsofoo"))
-      (eglot--dcase '(:title "foo" :command (:command "cmd" :title "alsofoo"))
-        (((Command) _title _command _arguments)
+      (pcase '(:title "foo" :command (:command "cmd" :title "alsofoo"))
+        ((Command)
          (ert-fail "Shouldn't have destructured this object as a Command"))
-        (((CodeAction) title command)
+        ((CodeAction title command)
          (list title command)))))))
+
+;; XXX: Need to make sure all the pcase-macroexpanders are redefined
+;; using the full `eglot--lsp-interface-alist'.
+(eglot--make-all-pcase-macroexpanders)
 
 (cl-defmacro eglot--guessing-contact ((interactive-sym
                                        prompt-args-sym
